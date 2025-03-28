@@ -6,15 +6,17 @@ import torch
 import pickle
 import argparse
 from torchvision import datasets, transforms
-from models.arch import MNISTModel, CifarModel, DisasterModel
-from models.test import test_model
+from models.arch import DisasterModel, DQN
+from models.test import test_model, test_dqn_model
 from utils.utils import (
     average_weights,
+    average_nav,
     send_data,
     receive_data,
     get_model_hash,
     compare_hash,
 )
+from utils.nav_utils import GridWorld, ReplayBuffer, DQNAgent, DoubleDQNAgent
 from utils.contrib import calculate_contribution
 from utils.blockchain import (
     gethash,
@@ -45,45 +47,37 @@ split_type = (
 )  # input("Enter 'iid', 'noniid', or 'noniid_unequal' for dataset split: ")
 dataset_type = args.dataset_type
 
-model = MNISTModel()
+env = GridWorld(grid_size=10, n_static=15, n_dynamic=5)
+replay_buffer = ReplayBuffer(capacity=10000)
 
-if dataset_type == "MNIST":
-    model = MNISTModel()
-elif dataset_type == "CIFAR":
-    model = CifarModel()
-elif dataset_type == "DIS":
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+dis_model = DisasterModel()
+dqn_agent = DQNAgent(input_channels=4, n_actions=env.n_actions, device=device)
+ddqn_agent = DoubleDQNAgent(input_channels=4, n_actions=env.n_actions, device=device)
+
+model = DisasterModel()
+
+if dataset_type == "DIS":
     model = DisasterModel()
 else:
     raise ModuleNotFoundError()
 
-transform = transforms.Compose(
-    [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+disaster_transform = transforms.Compose(
+    [
+        transforms.RandomRotation(30),
+        transforms.RandomHorizontalFlip(),
+        transforms.Resize(224),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ]
 )
-full_dataset = datasets.MNIST(
-    root="./data/mnist", train=True, download=True, transform=transform
+full_dataset = datasets.ImageFolder(
+    os.path.join("./data/disaster", "train"), transform=disaster_transform
 )
 
-if dataset_type == "MNIST":
-    mnist_transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,)),
-        ]
-    )
-    full_dataset = datasets.MNIST(
-        root="./data/mnist", train=True, download=True, transform=mnist_transform
-    )
-elif dataset_type == "CIFAR":
-    cifar_transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-    full_dataset = datasets.CIFAR10(
-        root="./data/cifar", train=True, download=True, transform=cifar_transform
-    )
-elif dataset_type == "DIS":
+if dataset_type == "DIS":
     disaster_transform = transforms.Compose(
         [
             transforms.RandomRotation(30),
@@ -113,7 +107,6 @@ contrib_list = []
 complete_dataset_size = 0
 
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
 
 global_epoch = 0
@@ -161,7 +154,12 @@ def client_handler(conn, addr):
         print(
             f"Sending model to client {client_dict[conn]} for global epoch {global_epoch}"
         )
-        globalweights = {"global_epoch": global_epoch, "weights": model.state_dict()}
+        globalweights = {
+            "global_epoch": global_epoch,
+            "dis_weights": model.state_dict(),
+            "dqn_weights": dqn_agent.policy_net.state_dict(),
+            "ddqn_weights": ddqn_agent.policy_net.state_dict(),
+        }
         send_data(conn, globalweights, False)
 
         try:
@@ -170,7 +168,11 @@ def client_handler(conn, addr):
             if localweights:
                 with lock:
                     local_epochs[client_add_dict[addr]] = localweights["local_epochs"]
-                    client_data[addr] = localweights["weights"]
+                    client_data[addr] = {
+                        "dis_weights": localweights["dis_weights"],
+                        "dqn_weights": localweights["dqn_weights"],
+                        "ddqn_weights": localweights["ddqn_weights"],
+                    }
                 conn.sendall(b"Update received")
             else:
                 print(f"No weights received from client {client_dict[conn]}")
@@ -196,13 +198,21 @@ def federated_training():
 
         local_weights_dict = {}
         local_weights = []
+        dqn_weights_dict = {}
+        dqn_weights = []
+        ddqn_weights_dict = {}
+        ddqn_weights = []
         with lock:
             for client, weights in client_data.items():
                 # print("data from ", client_add_dict[client])
-                local_weights_dict[client_add_dict[client]] = weights
+                local_weights_dict[client_add_dict[client]] = weights["dis_weights"]
                 local_weights.append(
-                    (weights, len(dataset_dict[client_add_dict[client]]))
+                    (weights["dis_weights"], len(dataset_dict[client_add_dict[client]]))
                 )
+                dqn_weights_dict[client_add_dict[client]] = weights["dqn_weights"]
+                dqn_weights.append((weights["dqn_weights"]))
+                ddqn_weights_dict[client_add_dict[client]] = weights["ddqn_weights"]
+                ddqn_weights.append((weights["ddqn_weights"]))
             client_data.clear()
 
         verif = True
@@ -218,20 +228,47 @@ def federated_training():
 
             if local_weights:
                 averaged_weights = average_weights(local_weights)
+                avg_dqn_weights = average_nav(dqn_weights)
+                avg_ddqn_weights = average_nav(ddqn_weights)
                 model.load_state_dict(averaged_weights)
+                dqn_agent.policy_net.load_state_dict(avg_dqn_weights)
+                dqn_agent.target_net.load_state_dict(avg_dqn_weights)
+                ddqn_agent.policy_net.load_state_dict(avg_ddqn_weights)
+                ddqn_agent.target_net.load_state_dict(avg_ddqn_weights)
                 print(f"Global model updated for epoch {epoch}.")
+                torch.save(model.state_dict(), f"runs/dis/model_{epoch}.pt")
+                torch.save(
+                    dqn_agent.policy_net.state_dict(), f"runs/nav/model_{epoch}.pt"
+                )
+                torch.save(
+                    ddqn_agent.policy_net.state_dict(), f"runs/nav/model_{epoch}.pt"
+                )
             else:
                 print(f"No local weights received for epoch {epoch}.")
 
             avg_loss, accuracy, precision, recall, f1 = test_model(
                 model=model, dataset=dataset_type
             )
+            os.makedirs(f"logs/server/DQN/", exist_ok=True)
+            os.makedirs(f"logs/server/DDQN/", exist_ok=True)
+            dqn_reward, dqn_success = test_dqn_model(
+                agent=dqn_agent,
+                env=env,
+                testing_log=f"logs/server/DQN/{global_epochs}.txt",
+                global_epoch=global_epoch,
+            )
+            ddqn_reward, ddqn_success = test_dqn_model(
+                agent=ddqn_agent,
+                env=env,
+                testing_log=f"logs/server/DDQN/{global_epochs}.txt",
+                global_epoch=global_epoch,
+            )
             time_taken = time.time() - start_time
             # if global_epoch != 0:
             accuracy_dict[global_epoch] = accuracy
             loss_dict[global_epoch] = avg_loss
             print(
-                f"After Epoch {epoch}: Loss = {avg_loss:.4f}, Accuracy = {accuracy * 100:.2f}%, Precision = {precision:.2f}%, Recall = {recall:.2f}% , F1 = {f1:.2f}%, Time= {time_taken}"
+                f"After Epoch {epoch}: Loss = {avg_loss:.4f}, Accuracy = {accuracy * 100:.2f}%, Precision = {precision:.2f}%, Recall = {recall:.2f}% , F1 = {f1:.2f}%, Time= {time_taken} "
             )
             if global_epoch != 0:
                 os.makedirs(f"./logs/server/{dataset_type}", exist_ok=True)

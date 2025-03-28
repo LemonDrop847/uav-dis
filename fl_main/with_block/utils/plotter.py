@@ -155,7 +155,7 @@ def plot_client_metric(xlabel, ylabel, client_data, output_dir):
 
 
 def plot_graphs(split_type, output_dir, dataset_dict, local_epochs):
-    log_files = glob.glob(f"logs/server/CIFAR/{split_type}_server_log*.txt")
+    log_files = glob.glob(f"logs/server/DIS/{split_type}_server_log*.txt")
     if not log_files:
         print("No server_log files found in the current directory.")
         return
@@ -173,7 +173,7 @@ def plot_graphs(split_type, output_dir, dataset_dict, local_epochs):
             output_dir,
         )
 
-    client_log_files = glob.glob(f"logs/client/CIFAR/{split_type}_client_log_*.txt")
+    client_log_files = glob.glob(f"logs/client/DIS/{split_type}_client_log_*.txt")
     if not client_log_files:
         print("No client log files found in the current directory.")
         return
@@ -184,7 +184,9 @@ def plot_graphs(split_type, output_dir, dataset_dict, local_epochs):
         client_id_match = re.search(r"client_log_(0x[a-fA-F0-9]+)\.txt$", file_path)
         if client_id_match:
             client_id = client_id_match.group(1)
-            title = str(local_epochs[client_id])+"-"+str(len(dataset_dict[client_id])) 
+            title = (
+                str(local_epochs[client_id]) + "-" + str(len(dataset_dict[client_id]))
+            )
             print(f"Processing file: {file_path} for Client {title}")
             client_data[title] = parse_log_file(file_path)
 
@@ -194,9 +196,235 @@ def plot_graphs(split_type, output_dir, dataset_dict, local_epochs):
         )
 
 
+import numpy as np
+
+
+def parse_log(file_path):
+    """
+    Reads a CSV log file with format:
+       epoch,reward,metric
+    Returns:
+       raw_epochs: the raw epoch values (numpy array)
+       rewards: the reward values (numpy array)
+       metric: the third column (e.g., epsilon in training logs or success in test logs)
+    """
+    try:
+        data = np.loadtxt(file_path, delimiter=",")
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+        raw_epochs = data[:, 0]
+        rewards = data[:, 1]
+        metric = data[:, 2]
+        return raw_epochs, rewards, metric
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return None, None, None
+
+
+def get_tick_positions_and_labels(raw_epochs, epoch_scale):
+    """
+    Returns tick positions (indices) and tick labels only for entries where raw_epoch % epoch_scale == 0.
+    Labels are formatted as "globalEpoch-0".
+    """
+    x_positions = np.arange(len(raw_epochs))
+    tick_positions = [
+        i for i, epoch in enumerate(raw_epochs) if (epoch % epoch_scale) == 0
+    ]
+    tick_labels = [
+        f"{int(epoch // epoch_scale)}-0"
+        for epoch in raw_epochs
+        if (epoch % epoch_scale) == 0
+    ]
+    return x_positions, tick_positions, tick_labels
+
+
+def plot_server_test_results(log_file="logs/server/DQN/server_testing_log.txt", dqn="DQN"):
+    """
+    Reads the server test log and plots:
+      1. Success vs Global Epochs
+      2. Reward vs Global Epochs
+    X-axis ticks are placed only at the start of each local epoch (epoch % 100 == 0).
+    """
+    if not os.path.exists(log_file):
+        print(f"Server log file {log_file} not found!")
+        return
+
+    raw_epochs, rewards, success = parse_log(log_file)
+    if raw_epochs is None:
+        return
+
+    x_positions, tick_positions, tick_labels = get_tick_positions_and_labels(
+        raw_epochs, epoch_scale=100
+    )
+
+    # Plot Success vs Global Epochs
+    plt.figure(figsize=(8, 5))
+    plt.plot(np.arange(len(raw_epochs)), success, color="green", linestyle="-")
+    plt.xlabel("Global Epoch - Local Episode")
+    plt.ylabel("Success (%)")
+    plt.title(f"{dqn} Server Test: Success vs Global Epochs")
+    plt.xticks(ticks=tick_positions, labels=tick_labels, rotation=45)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"server_test_success {dqn}.png")
+    print("Saved server_test_success.png")
+    plt.show()
+
+    # Plot Reward vs Global Epochs
+    plt.figure(figsize=(8, 5))
+    plt.plot(np.arange(len(raw_epochs)), rewards, color="blue", linestyle="-")
+    plt.xlabel("Global Epoch - Local Episode")
+    plt.ylabel("Reward")
+    plt.title(f"{dqn} Server Test: Reward vs Global Epochs")
+    plt.xticks(ticks=tick_positions, labels=tick_labels, rotation=45)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"server_test_reward {dqn}.png")
+    print("Saved server_test_reward.png")
+    plt.show()
+
+
+def plot_client_test_results(log_pattern="logs/client/dqn/test/*.txt", dqn="DQN"):
+    """
+    Reads multiple client test logs and plots:
+      1. Success vs Global Epochs
+      2. Reward vs Global Epochs
+    Each client's log is plotted as a separate line.
+    X-axis ticks are placed only at the start of each local epoch (epoch % 100 == 0).
+    """
+    test_files = glob.glob(log_pattern)
+    if not test_files:
+        print(f"No client test log files found with pattern {log_pattern}")
+        return
+
+    plt.figure(figsize=(8, 5))
+    for file in test_files:
+        raw_epochs, rewards, success = parse_log(file)
+        if raw_epochs is None:
+            continue
+        x_positions, tick_positions, tick_labels = get_tick_positions_and_labels(
+            raw_epochs, epoch_scale=100
+        )
+        client_id = os.path.splitext(os.path.basename(file))[0].split("_")[-1]
+        plt.plot(
+            np.arange(len(raw_epochs)),
+            success,
+            linestyle="-",
+            label=f"Client {client_id}",
+        )
+    plt.xlabel("Global Epoch - Local Episode")
+    plt.ylabel("Success (%)")
+    plt.title(f"{dqn} Client Test: Success vs Global Epochs")
+    plt.xticks(ticks=tick_positions, labels=tick_labels, rotation=45)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"client_test_success {dqn}.png")
+    print("Saved client_test_success.png")
+    plt.show()
+
+    plt.figure(figsize=(8, 5))
+    for file in test_files:
+        raw_epochs, rewards, success = parse_log(file)
+        if raw_epochs is None:
+            continue
+        x_positions, tick_positions, tick_labels = get_tick_positions_and_labels(
+            raw_epochs, epoch_scale=100
+        )
+        client_id = os.path.splitext(os.path.basename(file))[0].split("_")[-1]
+        plt.plot(
+            np.arange(len(raw_epochs)),
+            rewards,
+            linestyle="-",
+            label=f"Client {client_id}",
+        )
+    plt.xlabel("Global Epoch - Local Episode")
+    plt.ylabel("Reward")
+    plt.title(f"{dqn} Client Test: Reward vs Global Epochs")
+    plt.xticks(ticks=tick_positions, labels=tick_labels, rotation=45)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"client_test_reward {dqn}.png")
+    print("Saved client_test_reward.png")
+    plt.show()
+
+
+def plot_client_train_logs(log_pattern="logs/clients/dqn/train/*.txt", dqn="DQN"):
+    """
+    Reads multiple client training logs and plots:
+      1. Epsilon decay vs Global Epochs
+      2. Training Reward vs Global Epochs
+    Each client's log is plotted as a separate line.
+    X-axis ticks are placed only at the start of each local epoch (epoch % 1000 == 0).
+    """
+    train_files = glob.glob(log_pattern)
+    if not train_files:
+        print(f"No client training log files found with pattern {log_pattern}")
+        return
+
+    plt.figure(figsize=(8, 5))
+    for file in train_files:
+        raw_epochs, rewards, epsilon = parse_log(file)
+        if raw_epochs is None:
+            continue
+        x_positions, tick_positions, tick_labels = get_tick_positions_and_labels(
+            raw_epochs, epoch_scale=1000
+        )
+        client_id = os.path.splitext(os.path.basename(file))[0].split("_")[-1]
+        plt.plot(
+            np.arange(len(raw_epochs)),
+            epsilon,
+            linestyle="-",
+            label=f"Client {client_id}",
+        )
+    plt.xlabel("Global Epoch - Local Episode")
+    plt.ylabel("Epsilon")
+    plt.title(f"{dqn} Client Training: Epsilon Decay vs Global Epochs")
+    plt.xticks(ticks=tick_positions, labels=tick_labels, rotation=45)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"client_train_epsilon_decay {dqn}.png")
+    print("Saved client_train_epsilon_decay.png")
+    plt.show()
+
+    plt.figure(figsize=(8, 5))
+    for file in train_files:
+        raw_epochs, rewards, epsilon = parse_log(file)
+        if raw_epochs is None:
+            continue
+        x_positions, tick_positions, tick_labels = get_tick_positions_and_labels(
+            raw_epochs, epoch_scale=1000
+        )
+        client_id = os.path.splitext(os.path.basename(file))[0].split("_")[-1]
+        plt.plot(
+            np.arange(len(raw_epochs)),
+            rewards,
+            linestyle="-",
+            label=f"Client {client_id}",
+        )
+    plt.xlabel("Global Epoch - Local Episode")
+    plt.ylabel("Reward")
+    plt.title(f"{dqn} Client Training: Reward vs Global Epochs")
+    plt.xticks(ticks=tick_positions, labels=tick_labels, rotation=45)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"client_train_reward {dqn}.png")
+    print("Saved client_train_reward.png")
+    plt.show()
+
+
 def plot_metrics(dataset_dict, local_epochs, contrib_list, split_type):
-    output_dir = f"./metrics/CIFAR/{split_type}"
+    output_dir = f"./metrics/DIS/{split_type}"
     generate_client_table(dataset_dict, local_epochs, output_dir)
     plot_dataset_size_distribution(dataset_dict, output_dir)
     plot_contribution_scores(contrib_list, output_dir)
     plot_graphs(split_type, output_dir, dataset_dict, local_epochs)
+    plot_server_test_results(f"logs/server/DQN/10.txt", dqn="DQN")
+    plot_server_test_results(f"logs/server/DDQN/10.txt", dqn="DDQN")
+    plot_client_test_results("logs/client/DQN/test/*.txt", dqn="DQN")
+    plot_client_test_results("logs/client/DDQN/test/*.txt", dqn="DDQN")
+    plot_client_train_logs("logs/client/DQN/train/*.txt", dqn="DQN")
+    plot_client_train_logs("logs/client/DDQN/train/*.txt", dqn="DDQN")

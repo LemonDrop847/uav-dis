@@ -3,7 +3,7 @@ import glob
 import re
 import matplotlib.pyplot as plt
 
-dataset = "CIFAR"
+dataset = "DIS"
 
 
 def parse_log_file(file_path):
@@ -70,6 +70,4 @@ def compare_server_metrics(split_types, output_dir):
         print(f"Comparison graph saved as {filename}")
 
 
-compare_server_metrics(
-    ["noniid", "iid", "noniid_unequal"], f"./metrics/{dataset}/comparison/"
-)
+compare_server_metrics(["iid", "noniid_unequal"], f"./metrics/{dataset}/comparison/")

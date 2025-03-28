@@ -2,32 +2,14 @@ import torch
 import torch.nn as nn
 import os
 import torch.optim as optim
+import numpy as np
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from sklearn.metrics import precision_score, recall_score, f1_score
 
 
 def get_testset(dataset):
-    if dataset == "MNIST":
-        trans_mnist = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-        )
-        test_dataset = datasets.MNIST(
-            root="./data/mnist", train=False, download=True, transform=trans_mnist
-        )
-        return DataLoader(test_dataset, batch_size=32, shuffle=False)
-    elif dataset == "CIFAR":
-        trans_cifar = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ]
-        )
-        test_dataset = datasets.CIFAR10(
-            "./data/cifar", train=False, download=True, transform=trans_cifar
-        )
-        return DataLoader(test_dataset, batch_size=32, shuffle=False)
-    elif dataset == "DIS":
+    if dataset == "DIS":
         trans_disaster = transforms.Compose(
             [
                 transforms.Resize(224),
@@ -69,3 +51,32 @@ def test_model(model, dataset):
     f1 = f1_score(all_labels, all_preds, average="weighted")
 
     return loss / len(test_loader), accuracy, precision, recall, f1
+
+
+def test_dqn_model(
+    agent, env, testing_log, global_epoch, n_episodes=15, max_steps=1000
+):
+    total_rewards = []
+    success_percents = []
+    optimal_distance = 2 * (env.grid_size - 1)
+    with open(testing_log, "a") as f:
+        for episode in range(n_episodes):
+            state = env.reset()
+            episode_reward = 0
+            for t in range(max_steps):
+                action = agent.select_action(state, epsilon=0.0)
+                next_state, reward, done = env.step(action)
+                episode_reward += reward
+                state = next_state
+                if done:
+                    break
+            total_rewards.append(episode_reward)
+            agent_pos = env.agent_pos
+            current_distance = abs(agent_pos[0]) + abs(agent_pos[1])
+            success_percent = min(100.0, (current_distance / optimal_distance) * 100.0)
+            success_percents.append(success_percent)
+            f.write(f"{global_epoch*100+episode},{episode_reward},{success_percent}\n")
+    avg_reward = np.mean(total_rewards)
+    avg_success = np.mean(success_percents)
+    print(f"Testing: Avg Reward = {avg_reward:.2f}, Avg Success = {avg_success:.1f}%")
+    return total_rewards, success_percents

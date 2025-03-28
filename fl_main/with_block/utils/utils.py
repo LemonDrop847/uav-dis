@@ -17,6 +17,17 @@ def average_weights(weights):
     return w_avg
 
 
+def average_nav(weights_list):
+    """Averages a list of state_dicts (weights) and returns the averaged state_dict."""
+    avg_weights = {}
+    for key in weights_list[0].keys():
+        # Stack the tensors and compute the mean
+        avg_weights[key] = torch.mean(
+            torch.stack([w[key] for w in weights_list], dim=0), dim=0
+        )
+    return avg_weights
+
+
 def send_data(conn, data, isclient):
     serialized_data = pickle.dumps(data)
     data_len = len(serialized_data)

@@ -87,8 +87,8 @@ def compare_logs(
 
 if __name__ == "__main__":
     # split_type = "iid"
-    global_epochs = 50
-    dataset_type = "CIFAR"
+    global_epochs = 10
+    dataset_type = "DIS"
     non_block_log_path = (
         f"./baseline/logs/server/{dataset_type}/server_log_{global_epochs}.txt"
     )

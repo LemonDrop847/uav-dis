@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import os
 
 
 def train_model_with_dp(model, local_epochs, train_loader, dp_params):
@@ -69,3 +70,41 @@ def train_model_with_dp(model, local_epochs, train_loader, dp_params):
         )
 
     return model.state_dict()
+
+
+def train_dqn_model(
+    # self,
+    client_id,
+    agent,
+    env,
+    training_log,
+    global_epoch,
+    n_episodes=500,
+    max_steps=1000,
+    target_update=10,
+    epsilon_start=2.0,
+    epsilon_end=0.1,
+    epsilon_decay=0.995,
+):
+    epsilon = epsilon_start
+    with open(training_log, "a") as f:
+        for episode in range(n_episodes):
+            state = env.reset()
+            total_reward = 0
+            for t in range(max_steps):
+                action = agent.select_action(state, epsilon)
+                next_state, reward, done = env.step(action)
+                total_reward += reward
+                agent.memory.push(
+                    (state, action, reward, next_state if not done else None, done)
+                )
+                state = next_state
+                agent.optimize_model()
+                if done:
+                    break
+            if episode % target_update == 0:
+                agent.update_target_network()
+                f.write(f"{(global_epoch*1000)+episode},{total_reward},{epsilon}\n")
+            epsilon = max(epsilon * epsilon_decay, epsilon_end)
+    print(f"Client {client_id} finished local training.")
+    return total_reward

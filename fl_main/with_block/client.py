@@ -3,13 +3,14 @@ import pickle
 import torch
 import os
 import argparse
-from models.arch import MNISTModel, CifarModel, DisasterModel
-from models.train import train_model_with_dp
-from models.test import test_model
+from models.arch import DisasterModel, DQN
+from models.train import train_model_with_dp, train_dqn_model
+from models.test import test_model, test_dqn_model
 from utils.utils import send_data, receive_data, get_model_hash
 from utils.blockchain import sendhash
 from utils.sampling import DatasetSplit
 from torch.utils.data import DataLoader
+from utils.nav_utils import GridWorld, ReplayBuffer, DQNAgent, DoubleDQNAgent
 
 parser = argparse.ArgumentParser(description="Client script for federated learning.")
 parser.add_argument(
@@ -34,14 +35,19 @@ private_key = args.private_key
 dataset_type = args.dataset
 dp_type = args.dp_type
 
-model = MNISTModel()
+env = GridWorld(grid_size=10, n_static=15, n_dynamic=5)
+replay_buffer = ReplayBuffer(capacity=10000)
 
-if dataset_type == "MNIST":
-    model = MNISTModel()
-elif dataset_type == "CIFAR":
-    model = CifarModel()
-elif dataset_type == "DIS":
-    model = DisasterModel()
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+dis_model = DisasterModel()
+dqn_agent = DQNAgent(input_channels=4, n_actions=env.n_actions, device=device)
+ddqn_agent = DoubleDQNAgent(input_channels=4, n_actions=env.n_actions, device=device)
+
+dis_model.to(device)
+
+if dataset_type == "DIS":
+    dis_model = DisasterModel()
 else:
     raise ModuleNotFoundError()
 
@@ -55,9 +61,6 @@ elif dp_type == "laplace":
 else:
     raise AttributeError("DP Type not specified")
 
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model.to(device)
 
 prev_epoch_stats = ""
 prev_epoch = 0
@@ -92,20 +95,60 @@ def client():
             if global_weights is None:
                 print("No weights received. Ending training.")
                 break
+            env.reset()
+
             global_epoch = global_weights["global_epoch"]
-            model.load_state_dict(global_weights["weights"])
+            dis_model.load_state_dict(global_weights["dis_weights"])
+            dqn_agent.policy_net.load_state_dict(global_weights["dqn_weights"])
+            ddqn_agent.policy_net.load_state_dict(global_weights["ddqn_weights"])
+            dqn_agent.target_net.load_state_dict(global_weights["dqn_weights"])
+            ddqn_agent.target_net.load_state_dict(global_weights["ddqn_weights"])
 
             print(f"Starting local training for global epoch {global_epoch}")
-            model.load_state_dict(
-                train_model_with_dp(model, local_epochs, train_loader, dp_dict)
+            disaster_weights = train_model_with_dp(
+                dis_model, local_epochs, train_loader, dp_dict
             )
+            os.makedirs(f"logs/client/DQN/train/", exist_ok=True)
+            os.makedirs(f"logs/client/DDQN/train/", exist_ok=True)
+            os.makedirs(f"logs/client/DQN/test/", exist_ok=True)
+            os.makedirs(f"logs/client/DDQN/test/", exist_ok=True)
+            train_dqn_model(
+                client_id=client_id,
+                agent=dqn_agent,
+                env=env,
+                global_epoch=global_epoch,
+                training_log=f"logs/client/DQN/train/{client_id}.txt",
+            )
+            train_dqn_model(
+                client_id=client_id,
+                agent=ddqn_agent,
+                env=env,
+                global_epoch=global_epoch,
+                training_log=f"logs/client/DDQN/train/{client_id}.txt",
+            )
+            dis_model.load_state_dict(disaster_weights)
 
             avg_loss, accuracy, precision, recall, f1 = test_model(
-                model=model, dataset=dataset_type
+                model=dis_model, dataset=dataset_type
+            )
+            test_dqn_model(
+                agent=dqn_agent,
+                env=env,
+                global_epoch=global_epoch,
+                testing_log=f"logs/client/DQN/test/{client_id}.txt",
+            )
+            test_dqn_model(
+                agent=ddqn_agent,
+                env=env,
+                global_epoch=global_epoch,
+                testing_log=f"logs/client/DDQN/test/{client_id}.txt",
             )
             print(
-                f"Local model after Global Epoch {global_epoch}: Loss = {avg_loss:.4f}, Accuracy = {accuracy * 100:.2f}%"
+                f"Local disaster model after Global Epoch {global_epoch}: Loss = {avg_loss:.4f}, Accuracy = {accuracy * 100:.2f}%"
             )
+            # print(
+            #     f"Local DQN model after Global Epoch {global_epoch}: Sucess = {dqn_success*100:.4f}%, Reward = {dqn_avg_reward:.2f}"
+            # )
             if prev_epoch == global_epoch - 1:
                 os.makedirs(f"./logs/client/{dataset_type}", exist_ok=True)
                 with open(
@@ -116,11 +159,17 @@ def client():
                         f"Epoch {global_epoch}: Loss = {avg_loss}, Accuracy = {accuracy}, Precison = {precision}, Recall = {recall}, F1 = {f1}\n"
                     )
             prev_epoch = global_epoch
-            modelhash = get_model_hash(model.state_dict())
-            sendhash(client_id, private_key, modelhash, global_epoch)
             print(f"Sending updated weights to server for global epoch {global_epoch}")
-            localdata = {"weights": model.state_dict(), "local_epochs": local_epochs}
+            modelhash = get_model_hash(disaster_weights)
+            localdata = {
+                "dis_weights": disaster_weights,
+                "local_epochs": local_epochs,
+                "dqn_weights": dqn_agent.policy_net.state_dict(),
+                "ddqn_weights": ddqn_agent.policy_net.state_dict(),
+            }
+            sendhash(client_id, private_key, modelhash, global_epoch)
             send_data(conn, localdata, True)
+            print(f"Sent Weights to server")
 
             ack = conn.recv(1024)
             if ack == b"Training Complete":
