@@ -2,3 +2,7 @@ data/
 __pycache__
 _buffer.pt
 .venv
+test.py
+*.png
+logs/
+metrics/
